@@ -2,14 +2,21 @@
 // ===== KOMPTA TAX ENGINE (Python/FastAPI backend) CONNECTION =====
 // Start the backend first: `python run.py` inside kompta_tax_export/
 // It must be running at this address for export buttons to work.
-// The backend serves index.html with this meta emptied (same-origin); file:// and Live Server keep the loopback default.
-const KOMPTA_API_BASE = (document.querySelector('meta[name="kompta-api-base"]')?.content ?? 'http://127.0.0.1:8000').replace(/\/+$/, '');
+// Served over http(s) the app is same-origin; only file:// falls back to the loopback backend.
+const KOMPTA_API_BASE = window.location.protocol === 'file:' ? 'http://127.0.0.1:8000' : '';
+const KOMPTA_API_LABEL = KOMPTA_API_BASE || window.location.origin;
+// The ngrok free-tier interstitial would otherwise replace JSON API responses with HTML.
+function apiFetch(url, options = {}) {
+  const headers = new Headers(options.headers);
+  headers.set('ngrok-skip-browser-warning', 'true');
+  return fetch(url, { ...options, headers });
+}
 // CGNC account roots shared by every prefix check in the UI.
 const CGNC = Object.freeze({ CLIENTS:'3421', FOURNISSEURS:'4411', TVA_RECUPERABLE:'3455', TVA_FACTUREE:'4455', CHARGES:'6', PRODUITS:'7', CAISSE:'516' });
 function isAccount(code, ...roots) { const value = String(code); return roots.some(root => value.startsWith(root)); }
 function apiConnectionErrorMessage(error, action) {
   if (error instanceof TypeError) {
-    return `${action} : le navigateur ne peut pas lire ${KOMPTA_API_BASE} depuis ${window.location.origin} (serveur arrêté ou réponse CORS bloquée). Redémarrez avec python run.py; Live Server est autorisé par défaut sur http://127.0.0.1:5500.`;
+    return `${action} : le navigateur ne peut pas lire ${KOMPTA_API_LABEL} depuis ${window.location.origin} (serveur arrêté ou réponse CORS bloquée). Redémarrez avec python run.py; Live Server est autorisé par défaut sur http://127.0.0.1:5500.`;
   }
   return error?.message || `${action} impossible.`;
 }
@@ -53,7 +60,7 @@ function setClientManagerStatus(message, type = 'gray') {
 
 async function loadManagedClients() {
   try {
-    const response = await fetch(`${KOMPTA_API_BASE}/api/clients?include_demo=false`);
+    const response = await apiFetch(`${KOMPTA_API_BASE}/api/clients?include_demo=false`);
     if (!response.ok) throw new Error('Impossible de charger les clients réels.');
     managedClients = await response.json();
     syncManagedClientsIntoData();
@@ -130,7 +137,7 @@ async function saveManagedClient() {
   }
   const id = document.getElementById('managed-client-id').value;
   try {
-    const response = await fetch(`${KOMPTA_API_BASE}/api/clients${id ? `/${encodeURIComponent(id)}` : ''}`, {
+    const response = await apiFetch(`${KOMPTA_API_BASE}/api/clients${id ? `/${encodeURIComponent(id)}` : ''}`, {
       method: id ? 'PUT' : 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
     });
     const data = await response.json();
@@ -150,7 +157,7 @@ async function saveManagedFiscalYear() {
   if (!clientId) { setClientManagerStatus('Sélectionnez d’abord un client réel.', 'red'); return; }
   if (!Number.isInteger(year) || year < 2000 || year > 2100) { setClientManagerStatus('Saisissez une année entre 2000 et 2100.', 'red'); return; }
   try {
-    const response = await fetch(`${KOMPTA_API_BASE}/api/clients/${encodeURIComponent(clientId)}/fiscal-years`, {
+    const response = await apiFetch(`${KOMPTA_API_BASE}/api/clients/${encodeURIComponent(clientId)}/fiscal-years`, {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({year, status})
     });
     const data = await response.json();
@@ -346,7 +353,7 @@ function applyCgncChart(chart) {
 }
 async function loadCgncChart() {
   try {
-    const response = await fetch(`${KOMPTA_API_BASE}/api/accounts/cgnc`);
+    const response = await apiFetch(`${KOMPTA_API_BASE}/api/accounts/cgnc`);
     if (!response.ok) throw new Error(`Plan comptable CGNC indisponible (HTTP ${response.status}).`);
     applyCgncChart(await response.json());
     renderPlanComptable();
@@ -541,7 +548,7 @@ async function renderJournalAudit() {
   body.innerHTML = '<tr><td colspan="8" class="empty">Chargement du registre d’audit…</td></tr>';
   try {
     const query = new URLSearchParams({ client_id:currentClientId, year:String(currentYear) });
-    const response = await fetch(`${KOMPTA_API_BASE}/api/journal-audit?${query}`);
+    const response = await apiFetch(`${KOMPTA_API_BASE}/api/journal-audit?${query}`);
     if (!response.ok) throw new Error(`Lecture du registre d’audit impossible (HTTP ${response.status}).`);
     const events = await response.json();
     if (request !== journalAuditRequest || !document.getElementById('panel-audit')?.classList.contains('active')) return;
@@ -583,7 +590,7 @@ async function contrepasser(piece) {
   if (!window.confirm('Créer une contre-passation pour ' + piece + ' ?')) return;
   try {
     const scope = new URLSearchParams({ client_id: currentClientId, year: String(currentYear) });
-    const response = await fetch(`${KOMPTA_API_BASE}/api/journal-entries/${orig.serverEntryId}/reversal?${scope}` , { method:'POST' });
+    const response = await apiFetch(`${KOMPTA_API_BASE}/api/journal-entries/${orig.serverEntryId}/reversal?${scope}` , { method:'POST' });
     if (!response.ok) throw new Error((await response.json()).detail?.message || 'Reversal refusée');
     const posted = await response.json();
     await loadPersistedJournalEntries(currentClientId, currentYear);
@@ -596,7 +603,7 @@ async function contrepasser(piece) {
 async function loadPersistedJournalEntries(clientId, year) {
   try {
     const query = new URLSearchParams({ client_id: clientId, year: String(year) });
-    const response = await fetch(`${KOMPTA_API_BASE}/api/journal-entries?${query}`);
+    const response = await apiFetch(`${KOMPTA_API_BASE}/api/journal-entries?${query}`);
     if (!response.ok) throw new Error(`Lecture des écritures impossible (HTTP ${response.status}).`);
     const persisted = await response.json();
     const client = DATA.clientData[clientId] || (DATA.clientData[clientId] = { a_nouveaux_by_year:{}, journal_entries:[] });
@@ -977,7 +984,7 @@ async function exportSimplTva() {
   }
 
   try {
-    const res = await fetch(`${KOMPTA_API_BASE}/api/exports/simpl-tva`, {
+    const res = await apiFetch(`${KOMPTA_API_BASE}/api/exports/simpl-tva`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
@@ -1028,7 +1035,7 @@ async function exportTvaExcel() {
   };
 
   try {
-    const res = await fetch(`${KOMPTA_API_BASE}/export-tva-excel`, {
+    const res = await apiFetch(`${KOMPTA_API_BASE}/export-tva-excel`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request)
@@ -1121,7 +1128,7 @@ function portfolioClientPayload(dossier) {
 async function exportPortfolioTvaExcel() {
   const request = { clients: DATA.dossiers.map(portfolioClientPayload) };
   try {
-    const res = await fetch(`${KOMPTA_API_BASE}/export-portfolio-tva-excel`, {
+    const res = await apiFetch(`${KOMPTA_API_BASE}/export-portfolio-tva-excel`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request)
@@ -1403,7 +1410,7 @@ async function searchPcmAccounts(input) {
   }
   try {
     const params = new URLSearchParams({ q: query, limit: '10' });
-    const response = await fetch(`${KOMPTA_API_BASE}/api/accounts/pcge-general/search?${params}`);
+    const response = await apiFetch(`${KOMPTA_API_BASE}/api/accounts/pcge-general/search?${params}`);
     const result = await response.json();
     if (!response.ok) throw new Error(result.detail?.message || 'Recherche PCGE impossible.');
     if (accountSearchTokens.get(input) !== token || input.value.trim() !== query || document.activeElement !== input) return;
@@ -1721,7 +1728,7 @@ async function validerEcriture() {
   if (errors.length) { showToast(errors[0], 'error'); return; }
   let response;
   try {
-    response = await fetch(`${KOMPTA_API_BASE}/api/journal-entries`, {
+    response = await apiFetch(`${KOMPTA_API_BASE}/api/journal-entries`, {
       method:'POST', headers:{'Content-Type':'application/json'},
       body:JSON.stringify({ clientId:currentClientId, year:currentYear,
         journal:jname, date:dateVal, pieceNumber:document.getElementById('saisie-piece').value.trim(), reference:headerFacture,
@@ -1786,7 +1793,7 @@ async function saveJournalDraft() {
     tva:parseFloat(row.dataset.vatRate || '0') || 0
   }));
   try {
-    const response = await fetch(`${KOMPTA_API_BASE}/api/journal-drafts`, {
+    const response = await apiFetch(`${KOMPTA_API_BASE}/api/journal-drafts`, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
@@ -2349,7 +2356,7 @@ function renderPlanComptable() {
 function escapeAux(value) { return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 async function previewPcgeGeneral() {
   try {
-    const response = await fetch(`${KOMPTA_API_BASE}/api/accounts/pcge-general/preview`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({accountCatalog: DATA.accounts.filter(account => account.standard)}) });
+    const response = await apiFetch(`${KOMPTA_API_BASE}/api/accounts/pcge-general/preview`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({accountCatalog: DATA.accounts.filter(account => account.standard)}) });
     const body = await response.json();
     if (!response.ok) throw new Error(body.detail?.message || 'Source PCGE indisponible.');
     const rows = body.added || [];
@@ -2363,7 +2370,7 @@ async function previewPcgeGeneral() {
 async function importPcgeGeneral() {
   const button = document.getElementById('pcge-import-confirm'); button.disabled = true;
   try {
-    const response = await fetch(`${KOMPTA_API_BASE}/api/accounts/pcge-general/import`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({accountCatalog: DATA.accounts.filter(account => account.standard)}) });
+    const response = await apiFetch(`${KOMPTA_API_BASE}/api/accounts/pcge-general/import`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({accountCatalog: DATA.accounts.filter(account => account.standard)}) });
     const report = await response.json();
     if (!response.ok) throw new Error(report.detail?.message || 'Import PCGE impossible.');
     (report.imported || []).forEach(account => {
@@ -2702,7 +2709,7 @@ async function exportLiasseXml() {
   const balance = liasseBalanceRows();
   const request = { fiscalYear: currentYear, identifiantFiscal: liasseState.identifiantFiscal, balance, adjustments: liasseState.adjustments, creditAnterieur: liasseState.creditAnterieur || 0, acomptesIS: liasseState.acomptesIS || 0, creditsFiscaux: liasseState.creditsFiscaux || 0, cmRate: liasseState.cmRate, mappingRules: liasseMappingRules(), demoOnly: true };
   try {
-    const response = await fetch(`${KOMPTA_API_BASE}/api/liasse/simpl-is.xml`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(request) });
+    const response = await apiFetch(`${KOMPTA_API_BASE}/api/liasse/simpl-is.xml`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(request) });
     if (!response.ok) { showToast(await responseErrorMessage(response, 'Échec de l’export SIMPL-IS.'), 'error'); return; }
     const blob = await response.blob(); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `SIMPL_IS_${currentYear}.xml`; link.click(); URL.revokeObjectURL(url); saveLiasseState(); showToast('XML SIMPL-IS exporté.', 'success');
   } catch (error) { showToast(apiConnectionErrorMessage(error, 'Export SIMPL-IS'), 'error'); }
@@ -3389,7 +3396,7 @@ async function uploadOcrFile(file) {
     if (currentDossier?.ice) {
       headers['X-Kompta-Client-Ice'] = currentDossier.ice;
     }
-    const response = await fetch(`${KOMPTA_API_BASE}/api/ocr/documents`, {
+    const response = await apiFetch(`${KOMPTA_API_BASE}/api/ocr/documents`, {
       method: 'POST',
       body: file,
       headers: headers

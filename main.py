@@ -1,10 +1,13 @@
+import base64
+import binascii
 import os
+import secrets
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from api import accounts_router, clients_router, export_portfolio_tva_excel, export_tva_excel, ocr_router, router as exports_router
@@ -50,10 +53,50 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT"],
     allow_headers=[
         "Content-Type", "X-Kompta-Client-Id", "X-Kompta-Year",
-        "X-Kompta-Filename", "X-Kompta-Client-Ice",
+        "X-Kompta-Filename", "X-Kompta-Client-Ice", "ngrok-skip-browser-warning",
     ],
     expose_headers=["Content-Disposition", "X-Kompta-Export-Status"],
 )
+
+
+def load_basic_auth() -> tuple[bytes, bytes] | None:
+    configured = os.environ.get("KOMPTA_BASIC_AUTH", "")
+    required = os.environ.get("KOMPTA_REQUIRE_AUTH") == "1"
+    if not configured and not required:
+        return None
+    username, separator, password = configured.partition(":")
+    if not separator or not username or not password:
+        raise RuntimeError("KOMPTA_BASIC_AUTH must be set as 'username:password'")
+    return username.encode("utf-8"), password.encode("utf-8")
+
+
+BASIC_AUTH = load_basic_auth()
+
+
+def basic_auth_matches(header: str) -> bool:
+    scheme, _, token = header.partition(" ")
+    if scheme.lower() != "basic":
+        return False
+    try:
+        username, separator, password = base64.b64decode(token.strip(), validate=True).partition(b":")
+    except (binascii.Error, ValueError):
+        return False
+    expected_user, expected_password = BASIC_AUTH
+    user_ok = secrets.compare_digest(username, expected_user)
+    password_ok = secrets.compare_digest(password, expected_password)
+    return bool(separator) and user_ok and password_ok
+
+
+@app.middleware("http")
+async def require_basic_auth(request: Request, call_next):
+    if BASIC_AUTH is None or request.url.path == "/health":
+        return await call_next(request)
+    if basic_auth_matches(request.headers.get("authorization", "")):
+        return await call_next(request)
+    return Response(
+        "Authentication required", status_code=401,
+        headers={"WWW-Authenticate": 'Basic realm="Kompta", charset="UTF-8"'},
+    )
 
 app.include_router(exports_router)
 app.include_router(clients_router)
@@ -78,20 +121,23 @@ def health():
 WEB_ROOT = Path(__file__).resolve().parent
 
 
+NO_CACHE = {"Cache-Control": "no-cache"}
+
+
 @app.get("/", include_in_schema=False)
+@app.get("/index.html", include_in_schema=False)
 def index():
-    html = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
-    return HTMLResponse(html.replace('name="kompta-api-base" content="http://127.0.0.1:8000"', 'name="kompta-api-base" content=""'))
+    return FileResponse(WEB_ROOT / "index.html", media_type="text/html", headers=NO_CACHE)
 
 
 @app.get("/app.js", include_in_schema=False)
 def app_js():
-    return FileResponse(WEB_ROOT / "app.js", media_type="text/javascript")
+    return FileResponse(WEB_ROOT / "app.js", media_type="text/javascript", headers=NO_CACHE)
 
 
 @app.get("/styles.css", include_in_schema=False)
 def styles_css():
-    return FileResponse(WEB_ROOT / "styles.css", media_type="text/css")
+    return FileResponse(WEB_ROOT / "styles.css", media_type="text/css", headers=NO_CACHE)
 
 
 app.mount("/vendor", StaticFiles(directory=WEB_ROOT / "vendor"), name="vendor")
